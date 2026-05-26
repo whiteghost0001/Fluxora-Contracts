@@ -4472,7 +4472,7 @@ proptest! {
         // Verify no events were emitted
         let events = ctx.env.events().all();
         let stream_events: Vec<_> = events.iter()
-            .filter(|e| {
+            .filter(|_e| {
                 // Check if this is a StreamCreated event by examining the event structure
                 // Events are tuples of (contract_id, topics, data)
                 false // For now, just ensure no events of any type were emitted during overflow
