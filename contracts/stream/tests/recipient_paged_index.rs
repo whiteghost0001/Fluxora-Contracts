@@ -2,7 +2,7 @@ extern crate std;
 
 use fluxora_stream::{FluxoraStream, FluxoraStreamClient, MAX_RECIPIENT_PAGE_SIZE};
 use soroban_sdk::{
-    testutils::{Address as _},
+    testutils::Address as _,
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
 };
@@ -52,7 +52,7 @@ impl TestContext {
 #[test]
 fn test_recipient_index_migration() {
     let ctx = TestContext::setup();
-    
+
     // 1. Create 5 streams (flat list)
     for _ in 0..5 {
         ctx.client.create_stream(
@@ -100,7 +100,7 @@ fn test_recipient_index_migration() {
 fn test_paged_index_pagination() {
     let ctx = TestContext::setup();
     ctx.env.budget().reset_unlimited();
-    
+
     // Create many streams to force multiple pages
     let total_streams = (MAX_RECIPIENT_PAGE_SIZE * 2 + 5) as i32;
     for _ in 0..total_streams {
@@ -122,40 +122,77 @@ fn test_paged_index_pagination() {
 
     // Test pagination across page boundaries
     let limit = 10;
-    
+
     // First page
-    let page1 = ctx.client.get_recipient_streams_paginated(&ctx.recipient, &0, &limit);
+    let page1 = ctx
+        .client
+        .get_recipient_streams_paginated(&ctx.recipient, &0, &limit);
     assert_eq!(page1.len(), 10);
     // Stream IDs start from 0 (NextStreamId is initialized to 0 in init)
     assert_eq!(page1.get(0).unwrap(), 0);
 
     // Boundary of page 0 and 1
     let cursor = (MAX_RECIPIENT_PAGE_SIZE - 5) as u64;
-    let page_boundary = ctx.client.get_recipient_streams_paginated(&ctx.recipient, &cursor, &10);
+    let page_boundary = ctx
+        .client
+        .get_recipient_streams_paginated(&ctx.recipient, &cursor, &10);
     assert_eq!(page_boundary.len(), 10);
-    
+
     // Verify results match full list
     let all = ctx.client.get_recipient_streams(&ctx.recipient);
     for i in 0..10 {
-        assert_eq!(page_boundary.get(i as u32).unwrap(), all.get((cursor + i) as u32).unwrap());
+        assert_eq!(
+            page_boundary.get(i as u32).unwrap(),
+            all.get((cursor + i) as u32).unwrap()
+        );
     }
 }
 
 #[test]
 fn test_remove_from_paged_index() {
     let ctx = TestContext::setup();
-    
+
     // Create 3 streams
-    let id1 = ctx.client.create_stream(&ctx.sender, &ctx.recipient, &100, &1, &0, &0, &100, &0, &None);
-    let id2 = ctx.client.create_stream(&ctx.sender, &ctx.recipient, &100, &1, &0, &0, &100, &0, &None);
-    let id3 = ctx.client.create_stream(&ctx.sender, &ctx.recipient, &100, &1, &0, &0, &100, &0, &None);
+    let id1 = ctx.client.create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100,
+        &1,
+        &0,
+        &0,
+        &100,
+        &0,
+        &None,
+    );
+    let id2 = ctx.client.create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100,
+        &1,
+        &0,
+        &0,
+        &100,
+        &0,
+        &None,
+    );
+    let id3 = ctx.client.create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &100,
+        &1,
+        &0,
+        &0,
+        &100,
+        &0,
+        &None,
+    );
 
     ctx.client.migrate_recipient_index(&ctx.recipient);
-    
+
     // Cancel and close stream 2 (should remove from paged index)
     ctx.client.cancel_stream(&id2);
     ctx.client.close_completed_stream(&id2);
-    
+
     let streams = ctx.client.get_recipient_streams(&ctx.recipient);
     assert_eq!(streams.len(), 2);
     assert!(streams.contains(id1));

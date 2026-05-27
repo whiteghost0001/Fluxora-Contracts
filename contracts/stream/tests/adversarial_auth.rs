@@ -833,3 +833,138 @@ fn test_admin_pause_fails_after_cancel() {
         .try_pause_stream_as_admin(&stream_id, &PauseReason::Administrative);
     assert_eq!(result, Err(Ok(ContractError::StreamTerminalState)));
 }
+
+// ---------------------------------------------------------------------------
+// Recipient Update (Propose-and-Accept) — Issue #534
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_recipient_update_propose_and_accept_flow() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+    let new_recipient = Address::generate(&ctx.env);
+
+    // 1. Propose (Sender)
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "update_recipient",
+            args: (stream_id, new_recipient.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.client().update_recipient(&stream_id, &new_recipient);
+
+    // Verify pending update exists
+    let pending = ctx
+        .client()
+        .get_pending_recipient_update(&stream_id)
+        .unwrap();
+    assert_eq!(pending.proposed_recipient, new_recipient);
+
+    // 2. Accept (Current Recipient)
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.recipient,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "accept_recipient_update",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.client().accept_recipient_update(&stream_id);
+
+    // Verify update applied
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.recipient, new_recipient);
+    assert!(ctx
+        .client()
+        .get_pending_recipient_update(&stream_id)
+        .is_none());
+}
+
+#[test]
+fn test_recipient_update_cancel_by_sender() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+    let new_recipient = Address::generate(&ctx.env);
+
+    // Propose
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "update_recipient",
+            args: (stream_id, new_recipient.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.client().update_recipient(&stream_id, &new_recipient);
+
+    // Cancel (Sender)
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "cancel_recipient_update",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.client().cancel_recipient_update(&stream_id);
+
+    // Verify cancelled
+    assert!(ctx
+        .client()
+        .get_pending_recipient_update(&stream_id)
+        .is_none());
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.recipient, ctx.recipient);
+}
+
+#[test]
+fn test_recipient_update_auth_enforcement() {
+    let ctx = Ctx::setup();
+    let stream_id = ctx.create_stream();
+    let new_recipient = Address::generate(&ctx.env);
+
+    // Sender proposes
+    ctx.env.mock_auths(&[MockAuth {
+        address: &ctx.sender,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "update_recipient",
+            args: (stream_id, new_recipient.clone()).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.client().update_recipient(&stream_id, &new_recipient);
+
+    // Random person tries to accept (Unauthorized)
+    let stranger = Address::generate(&ctx.env);
+    ctx.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "accept_recipient_update",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = ctx.client().try_accept_recipient_update(&stream_id);
+    assert!(res.is_err());
+
+    // Random person tries to cancel (Unauthorized)
+    ctx.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &ctx.contract_id,
+            fn_name: "cancel_recipient_update",
+            args: (stream_id,).into_val(&ctx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = ctx.client().try_cancel_recipient_update(&stream_id);
+    assert!(res.is_err());
+}
