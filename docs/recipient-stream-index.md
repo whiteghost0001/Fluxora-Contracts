@@ -14,13 +14,22 @@ The recipient stream index is a secondary data structure that enables efficient 
 
 ## Data Structure
 
-### Storage Key
+### Storage Keys
 
 ```rust
-DataKey::RecipientStreams(Address)  // Persistent storage for recipient stream index
+DataKey::RecipientStreams(Address)      // Legacy flat list (Vec<u64>)
+DataKey::RecipientStreamPage(Address, u32) // Paged index entry (fixed-size Vec<u64>)
+DataKey::RecipientStreamPageCount(Address) // Number of pages for a recipient
 ```
 
-Each recipient address maps to a `Vec<u64>` of stream IDs, maintained in sorted ascending order.
+### Paged Index (#519)
+
+From **CONTRACT_VERSION 6**, the contract supports a segmented paged index to bound read/write costs for recipients with many streams.
+
+- **MAX_RECIPIENT_PAGE_SIZE**: 100 entries per page.
+- **Dense Pages**: Only the last page can be partially full. When a stream is removed, the last element of the last page is moved to the gap to maintain density.
+- **Migration**: A legacy flat list can be migrated to the paged format via `migrate_recipient_index(recipient)`.
+- **Complexity**: Paged index bounds per-operation I/O at O(1) regardless of history, as only one or two pages (each capped at 100 IDs) are touched per mutation.
 
 ### Invariants
 
@@ -202,14 +211,15 @@ To provide crisp assurances to integrators, the recipient index observes strict 
 
 ### Time Complexity
 
-| Operation                    | Complexity | Notes                  |
-| ---------------------------- | ---------- | ---------------------- |
-| `get_recipient_streams`      | O(1)       | Direct storage read    |
-| `get_recipient_stream_count` | O(1)       | Direct storage read    |
-| Add stream to index          | O(n)       | Binary search + insert |
-| Remove stream from index     | O(n)       | Linear search + remove |
+| Operation                    | Flat List | Paged Index | Notes |
+| ---------------------------- | --------- | ----------- | ----- |
+| `get_recipient_streams`      | O(1)      | O(Pages)    | Loads all IDs into memory |
+| `get_recipient_streams_paginated` | O(N) | O(limit) | Paged index uses cursor jump |
+| Add stream to index          | O(N)      | O(1)        | Paged index touches last page only |
+| Remove stream from index     | O(N)      | O(1)*       | *Amortised (touches 2 pages max) |
 
-Where n = number of streams for the recipient (typically small).
+Where N = total number of streams for the recipient.
+Paged index bounds per-operation I/O by only loading relevant pages (max 100 entries each).
 
 ### Storage Complexity
 

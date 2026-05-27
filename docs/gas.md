@@ -44,8 +44,11 @@ Batches of 20–50 are safe in isolation but leave less headroom for other
 operations in the same transaction.
 
 **Same-recipient penalty:** When all streams in a batch share the same recipient,
-the `RecipientStreams` index is read and written N times (O(N) persistent I/O).
-For 10 streams to the same recipient, allow up to 8 000 000 CPU / 4 000 000 bytes.
+the `RecipientStreams` index is updated N times.
+- **Legacy Flat List**: O(N) persistent I/O per update (reads/writes full list).
+- **Paged Index**: O(1) persistent I/O per update (touches last page only).
+
+For 10 streams to the same recipient, allow up to 8 000 000 CPU / 4 000 000 bytes if using flat list; paged index significantly reduces this overhead.
 
 ### `batch_withdraw`
 
