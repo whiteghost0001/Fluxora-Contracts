@@ -33,6 +33,12 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 120_960;
 /// All paginated entrypoints enforce this limit strictly.
 pub const MAX_PAGE_SIZE: u64 = 100;
 
+/// Maximum number of stream IDs stored per page in the paged recipient stream index.
+///
+/// Bounds per-operation I/O to O(1) regardless of how many streams a recipient has.
+/// See `DataKey::RecipientStreamPage` and `migrate_recipient_index`.
+pub const MAX_RECIPIENT_PAGE_SIZE: u32 = 100;
+
 /// Maximum memo payload size in bytes (stream metadata for indexers).
 pub const MAX_MEMO_BYTES: usize = 64;
 
@@ -165,6 +171,12 @@ pub enum ContractError {
     SignatureDeadlineExpired = 18,
     /// The provided signature does not match the expected signer.
     InvalidSignature = 19,
+    /// `withdraw_dust_threshold` exceeds `deposit_amount`; recipient could never withdraw.
+    InvalidDustThreshold = 20,
+    /// No pending recipient update exists for this stream.
+    NoPendingRecipientUpdate = 21,
+    /// A pending recipient update already exists for this stream.
+    PendingRecipientUpdateExists = 22,
 }
 
 #[contracttype]
@@ -233,6 +245,36 @@ pub struct RecipientUpdated {
     pub stream_id: u64,
     pub old_recipient: Address,
     pub new_recipient: Address,
+}
+
+/// Pending recipient update proposal (stored under `DataKey::PendingRecipientUpdate`).
+///
+/// Created by the sender via `update_recipient`; accepted by the current recipient
+/// via `accept_recipient_update` within the veto window.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingRecipientUpdate {
+    /// The proposed new recipient address.
+    pub proposed_recipient: Address,
+    /// Ledger timestamp when the proposal was created.
+    pub proposed_at: u64,
+}
+
+/// Emitted when a sender proposes a recipient update.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientUpdateProposed {
+    pub stream_id: u64,
+    pub current_recipient: Address,
+    pub proposed_recipient: Address,
+    pub proposed_at: u64,
+}
+
+/// Emitted when a pending recipient update is cancelled by the sender.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientUpdateCancelled {
+    pub stream_id: u64,
 }
 
 /// Per-stream result for `batch_withdraw`.
@@ -780,27 +822,220 @@ fn save_recipient_streams(env: &Env, recipient: &Address, streams: &soroban_sdk:
 /// Add a stream ID to a recipient's index (maintains sorted order).
 /// Assumes stream_id is not already in the list.
 fn add_stream_to_recipient_index(env: &Env, recipient: &Address, stream_id: u64) {
-    let mut streams = load_recipient_streams(env, recipient);
+    let page_count = load_recipient_page_count(env, recipient);
+    if page_count > 0 {
+        add_stream_to_paged_index(env, recipient, stream_id);
+    } else {
+        let mut streams = load_recipient_streams(env, recipient);
 
-    // Insert in sorted order (binary search for insertion point)
-    let insert_pos = match streams.binary_search(stream_id) {
-        Ok(pos) => pos,
-        Err(pos) => pos,
-    };
+        // Insert in sorted order (binary search for insertion point)
+        let insert_pos = match streams.binary_search(stream_id) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
 
-    streams.insert(insert_pos, stream_id);
-    save_recipient_streams(env, recipient, &streams);
+        streams.insert(insert_pos, stream_id);
+        save_recipient_streams(env, recipient, &streams);
+    }
 }
 
 /// Remove a stream ID from a recipient's index.
 fn remove_stream_from_recipient_index(env: &Env, recipient: &Address, stream_id: u64) {
-    let mut streams = load_recipient_streams(env, recipient);
+    let page_count = load_recipient_page_count(env, recipient);
+    if page_count > 0 {
+        remove_stream_from_paged_index(env, recipient, stream_id);
+    } else {
+        let mut streams = load_recipient_streams(env, recipient);
 
-    // Find and remove the stream_id
-    if let Ok(idx) = streams.binary_search(stream_id) {
-        streams.remove(idx);
-        save_recipient_streams(env, recipient, &streams);
+        // Find and remove the stream_id
+        if let Ok(idx) = streams.binary_search(stream_id) {
+            streams.remove(idx);
+            save_recipient_streams(env, recipient, &streams);
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Paged recipient stream index helpers (Issue #519)
+// ---------------------------------------------------------------------------
+
+/// Load a single page of stream IDs for a recipient.
+fn load_recipient_page(env: &Env, recipient: &Address, page: u32) -> soroban_sdk::Vec<u64> {
+    let key = DataKey::RecipientStreamPage(recipient.clone(), page);
+    let ids: soroban_sdk::Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    if !ids.is_empty() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    ids
+}
+
+/// Save a single page of stream IDs for a recipient.
+fn save_recipient_page(env: &Env, recipient: &Address, page: u32, ids: &soroban_sdk::Vec<u64>) {
+    let key = DataKey::RecipientStreamPage(recipient.clone(), page);
+    env.storage().persistent().set(&key, ids);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Load the number of pages in a recipient's paged index (0 if none).
+fn load_recipient_page_count(env: &Env, recipient: &Address) -> u32 {
+    let key = DataKey::RecipientStreamPageCount(recipient.clone());
+    env.storage().persistent().get(&key).unwrap_or(0u32)
+}
+
+/// Save the number of pages in a recipient's paged index.
+fn save_recipient_page_count(env: &Env, recipient: &Address, count: u32) {
+    let key = DataKey::RecipientStreamPageCount(recipient.clone());
+    env.storage().persistent().set(&key, &count);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Add a stream ID to the paged recipient index.
+///
+/// Appends to the last page; creates a new page when the last page is full.
+/// O(1) per call regardless of total stream count.
+fn add_stream_to_paged_index(env: &Env, recipient: &Address, stream_id: u64) {
+    let page_count = load_recipient_page_count(env, recipient);
+
+    if page_count == 0 {
+        // First stream: create page 0.
+        let mut page = soroban_sdk::Vec::new(env);
+        page.push_back(stream_id);
+        save_recipient_page(env, recipient, 0, &page);
+        save_recipient_page_count(env, recipient, 1);
+        return;
+    }
+
+    let last_page_idx = page_count - 1;
+    let mut last_page = load_recipient_page(env, recipient, last_page_idx);
+
+    if last_page.len() < MAX_RECIPIENT_PAGE_SIZE {
+        last_page.push_back(stream_id);
+        save_recipient_page(env, recipient, last_page_idx, &last_page);
+    } else {
+        // Last page is full; start a new page.
+        let mut new_page = soroban_sdk::Vec::new(env);
+        new_page.push_back(stream_id);
+        save_recipient_page(env, recipient, page_count, &new_page);
+        save_recipient_page_count(env, recipient, page_count + 1);
+    }
+}
+
+/// Remove a stream ID from the paged recipient index.
+///
+/// Scans pages from the last to the first (most recent streams are removed most often).
+/// Fills the gap by moving the last element of the last page into the removed slot,
+/// keeping pages dense. O(pages) worst case but O(1) amortised for recent streams.
+fn remove_stream_from_paged_index(env: &Env, recipient: &Address, stream_id: u64) {
+    let page_count = load_recipient_page_count(env, recipient);
+    if page_count == 0 {
+        return;
+    }
+
+    // Find the page and position containing stream_id.
+    let mut found_page: Option<u32> = None;
+    let mut found_pos: Option<u32> = None;
+
+    // Scan from last page backwards (recent streams removed most often).
+    let mut p = page_count;
+    while p > 0 {
+        p -= 1;
+        let page = load_recipient_page(env, recipient, p);
+        for i in 0..page.len() {
+            if page.get(i).unwrap() == stream_id {
+                found_page = Some(p);
+                found_pos = Some(i);
+                break;
+            }
+        }
+        if found_page.is_some() {
+            break;
+        }
+    }
+
+    let (fp, fi) = match (found_page, found_pos) {
+        (Some(fp), Some(fi)) => (fp, fi),
+        _ => return, // stream_id not in paged index
+    };
+
+    let last_page_idx = page_count - 1;
+    let mut last_page = load_recipient_page(env, recipient, last_page_idx);
+    let last_page_len = last_page.len();
+
+    if fp == last_page_idx {
+        // Remove from the last page directly.
+        last_page.remove(fi);
+        if last_page.is_empty() {
+            // Remove the empty page and decrement count.
+            let key = DataKey::RecipientStreamPage(recipient.clone(), last_page_idx);
+            env.storage().persistent().remove(&key);
+            save_recipient_page_count(env, recipient, last_page_idx);
+        } else {
+            save_recipient_page(env, recipient, last_page_idx, &last_page);
+        }
+    } else {
+        // Swap the target slot with the last element of the last page.
+        let last_id = last_page.get(last_page_len - 1).unwrap();
+        let mut target_page = load_recipient_page(env, recipient, fp);
+        target_page.set(fi, last_id);
+        save_recipient_page(env, recipient, fp, &target_page);
+
+        last_page.remove(last_page_len - 1);
+        if last_page.is_empty() {
+            let key = DataKey::RecipientStreamPage(recipient.clone(), last_page_idx);
+            env.storage().persistent().remove(&key);
+            save_recipient_page_count(env, recipient, last_page_idx);
+        } else {
+            save_recipient_page(env, recipient, last_page_idx, &last_page);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pending recipient update helpers (Issue #534)
+// ---------------------------------------------------------------------------
+
+fn load_pending_recipient_update(env: &Env, stream_id: u64) -> Option<PendingRecipientUpdate> {
+    let key = DataKey::PendingRecipientUpdate(stream_id);
+    let update: Option<PendingRecipientUpdate> = env.storage().persistent().get(&key);
+    if update.is_some() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+    update
+}
+
+fn save_pending_recipient_update(env: &Env, stream_id: u64, update: &PendingRecipientUpdate) {
+    let key = DataKey::PendingRecipientUpdate(stream_id);
+    env.storage().persistent().set(&key, update);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+fn remove_pending_recipient_update(env: &Env, stream_id: u64) {
+    let key = DataKey::PendingRecipientUpdate(stream_id);
+    env.storage().persistent().remove(&key);
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,6 +1398,13 @@ impl FluxoraStream {
             if m.len() as usize > MAX_MEMO_BYTES {
                 return Err(ContractError::InvalidParams);
             }
+        }
+
+        // Guard: dust_threshold must not exceed deposit_amount.
+        // If it did, the recipient could never withdraw (every attempt would be
+        // rejected as dust), permanently locking their funds.
+        if withdraw_dust_threshold > deposit_amount {
+            return Err(ContractError::InvalidDustThreshold);
         }
 
         let stream_id = read_stream_count(env);
@@ -2264,41 +2506,97 @@ impl FluxoraStream {
         Ok(withdrawable)
     }
 
-    /// Rotate the receiving address for a stream.
+    /// Propose a recipient update for a stream (sender-initiated).
     ///
-    /// This allows the current recipient to transfer their entitlement to a new
-    /// address (e.g. in case of a compromised wallet). Only the current recipient
-    /// may authorize this rotation.
+    /// Stores a pending proposal under `DataKey::PendingRecipientUpdate(stream_id)`.
+    /// The current recipient must call `accept_recipient_update` to finalise the change.
+    /// The sender may call `cancel_recipient_update` to withdraw the proposal at any time.
     ///
     /// # Parameters
-    /// - `stream_id`: Unique identifier of the stream to update.
-    /// - `new_recipient`: The new address that will receive the remaining streamed tokens.
+    /// - `stream_id`: Unique identifier of the stream.
+    /// - `new_recipient`: The proposed new recipient address.
+    ///
+    /// # Authorization
+    /// - Requires authorization from the stream's sender.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` if the stream does not exist.
+    /// - `InvalidParams` if `new_recipient == current_recipient`.
+    /// - `PendingRecipientUpdateExists` if a proposal is already pending.
     pub fn update_recipient(
         env: Env,
         stream_id: u64,
         new_recipient: Address,
     ) -> Result<(), ContractError> {
         require_not_globally_paused(&env)?;
-        let mut stream = load_stream(&env, stream_id)?;
+        let stream = load_stream(&env, stream_id)?;
 
-        // Only current recipient can authorize rotation
-        stream.recipient.require_auth();
+        // Only the sender may propose a recipient change.
+        stream.sender.require_auth();
 
         if new_recipient == stream.recipient {
             return Err(ContractError::InvalidParams);
         }
 
-        let old_recipient = stream.recipient.clone();
+        // Reject if a proposal is already pending.
+        if load_pending_recipient_update(&env, stream_id).is_some() {
+            return Err(ContractError::PendingRecipientUpdateExists);
+        }
 
-        // Update indices atomically
+        let proposed_at = env.ledger().timestamp();
+        let update = PendingRecipientUpdate {
+            proposed_recipient: new_recipient.clone(),
+            proposed_at,
+        };
+        save_pending_recipient_update(&env, stream_id, &update);
+
+        env.events().publish(
+            (symbol_short!("recp_prp"), stream_id),
+            RecipientUpdateProposed {
+                stream_id,
+                current_recipient: stream.recipient,
+                proposed_recipient: new_recipient,
+                proposed_at,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Accept a pending recipient update (current recipient only).
+    ///
+    /// Finalises the recipient rotation proposed by the sender. Emits `RecipientUpdated`.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream.
+    ///
+    /// # Authorization
+    /// - Requires authorization from the **current** recipient.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` if the stream does not exist.
+    /// - `NoPendingRecipientUpdate` if no proposal exists.
+    pub fn accept_recipient_update(env: Env, stream_id: u64) -> Result<(), ContractError> {
+        require_not_globally_paused(&env)?;
+        let mut stream = load_stream(&env, stream_id)?;
+
+        // Only the current recipient may accept.
+        stream.recipient.require_auth();
+
+        let update = load_pending_recipient_update(&env, stream_id)
+            .ok_or(ContractError::NoPendingRecipientUpdate)?;
+
+        let old_recipient = stream.recipient.clone();
+        let new_recipient = update.proposed_recipient;
+
+        // Update indices atomically.
         remove_stream_from_recipient_index(&env, &old_recipient, stream_id);
         add_stream_to_recipient_index(&env, &new_recipient, stream_id);
 
-        // Update state
         stream.recipient = new_recipient.clone();
         save_stream(&env, &stream);
+        remove_pending_recipient_update(&env, stream_id);
 
-        // Emit event
         env.events().publish(
             (symbol_short!("recp_upd"), stream_id),
             RecipientUpdated {
@@ -2309,6 +2607,45 @@ impl FluxoraStream {
         );
 
         Ok(())
+    }
+
+    /// Cancel a pending recipient update (sender only).
+    ///
+    /// Withdraws the proposal without changing the recipient.
+    ///
+    /// # Parameters
+    /// - `stream_id`: Unique identifier of the stream.
+    ///
+    /// # Authorization
+    /// - Requires authorization from the stream's sender.
+    ///
+    /// # Errors
+    /// - `StreamNotFound` if the stream does not exist.
+    /// - `NoPendingRecipientUpdate` if no proposal exists.
+    pub fn cancel_recipient_update(env: Env, stream_id: u64) -> Result<(), ContractError> {
+        let stream = load_stream(&env, stream_id)?;
+        stream.sender.require_auth();
+
+        if load_pending_recipient_update(&env, stream_id).is_none() {
+            return Err(ContractError::NoPendingRecipientUpdate);
+        }
+
+        remove_pending_recipient_update(&env, stream_id);
+
+        env.events().publish(
+            (symbol_short!("recp_cxl"), stream_id),
+            RecipientUpdateCancelled { stream_id },
+        );
+
+        Ok(())
+    }
+
+    /// Get the pending recipient update proposal for a stream, if any.
+    pub fn get_pending_recipient_update(
+        env: Env,
+        stream_id: u64,
+    ) -> Option<PendingRecipientUpdate> {
+        load_pending_recipient_update(&env, stream_id)
     }
 
     /// Withdraw accrued tokens from multiple streams in one call (recipient-only).
@@ -3658,9 +3995,69 @@ impl FluxoraStream {
     /// - Get all streams for a recipient: `get_recipient_streams(env, recipient_address)`
     /// - Paginate: fetch first N IDs, then call `get_stream_state` for each
     /// - Filter by status: fetch all IDs, then check status of each via `get_stream_state`
+    /// Get all stream IDs for a recipient.
+    ///
+    /// # Parameters
+    /// - `recipient`: Address to query streams for
+    ///
+    /// # Returns
+    /// - `soroban_sdk::Vec<u64>`: List of active stream IDs
     pub fn get_recipient_streams(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
         bump_instance_ttl(&env);
-        load_recipient_streams(&env, &recipient)
+        let page_count = load_recipient_page_count(&env, &recipient);
+        if page_count > 0 {
+            let mut result = soroban_sdk::Vec::new(&env);
+            for p in 0..page_count {
+                let page = load_recipient_page(&env, &recipient, p);
+                for i in 0..page.len() {
+                    result.push_back(page.get(i).unwrap());
+                }
+            }
+            result
+        } else {
+            load_recipient_streams(&env, &recipient)
+        }
+    }
+
+    /// Migrate a recipient's stream index from flat list to paged index.
+    ///
+    /// Reduces read cost for recipients with many streams. Paged index bounds
+    /// per-operation I/O at O(1).
+    ///
+    /// # Parameters
+    /// - `recipient`: Address of the recipient to migrate
+    ///
+    /// # Authorization
+    /// - Requires authorization from the contract admin.
+    pub fn migrate_recipient_index(env: Env, recipient: Address) -> Result<(), ContractError> {
+        let config = get_config(&env)?;
+        config.admin.require_auth();
+
+        if load_recipient_page_count(&env, &recipient) > 0 {
+            return Err(ContractError::InvalidState); // Already migrated
+        }
+
+        let flat_key = DataKey::RecipientStreams(recipient.clone());
+        let flat_streams: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&flat_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+
+        if flat_streams.is_empty() {
+            return Ok(());
+        }
+
+        // Migrate to pages
+        for i in 0..flat_streams.len() {
+            let stream_id = flat_streams.get(i).unwrap();
+            add_stream_to_paged_index(&env, &recipient, stream_id);
+        }
+
+        // Remove flat list to save storage and gas on future adds
+        env.storage().persistent().remove(&flat_key);
+
+        Ok(())
     }
 
     /// Count the total number of streams for a recipient.
@@ -3808,26 +4205,55 @@ impl FluxoraStream {
     ) -> soroban_sdk::Vec<u64> {
         // Enforce DoS protection limit
         let page_size = limit.min(MAX_PAGE_SIZE) as u32;
-        let all_streams = load_recipient_streams(&env, &recipient);
-        let total = all_streams.len() as u64;
-
-        // Return empty if cursor is beyond end
-        if cursor >= total || page_size == 0 {
+        if page_size == 0 {
             return soroban_sdk::Vec::new(&env);
         }
 
-        let start_idx = cursor as u32;
-        let available = total as u32 - start_idx;
-        let take_count = page_size.min(available);
+        let page_count = load_recipient_page_count(&env, &recipient);
+        if page_count > 0 {
+            let mut result = soroban_sdk::Vec::new(&env);
 
-        let mut result = soroban_sdk::Vec::new(&env);
-        for i in 0..take_count {
-            if let Some(stream_id) = all_streams.get(start_idx + i) {
-                result.push_back(stream_id);
+            // Paged index jump logic: O(limit) regardless of total stream count.
+            let mut current_page_idx = (cursor / MAX_RECIPIENT_PAGE_SIZE as u64) as u32;
+            let mut offset_in_page = (cursor % MAX_RECIPIENT_PAGE_SIZE as u64) as u32;
+
+            while current_page_idx < page_count && result.len() < page_size {
+                let page = load_recipient_page(&env, &recipient, current_page_idx);
+
+                for i in offset_in_page..page.len() {
+                    result.push_back(page.get(i).unwrap());
+                    if result.len() >= page_size {
+                        break;
+                    }
+                }
+
+                current_page_idx += 1;
+                offset_in_page = 0; // After first page, we start from 0
             }
-        }
+            result
+        } else {
+            // Fallback to flat list (legacy)
+            let all_streams = load_recipient_streams(&env, &recipient);
+            let total = all_streams.len() as u64;
 
-        result
+            // Return empty if cursor is beyond end
+            if cursor >= total {
+                return soroban_sdk::Vec::new(&env);
+            }
+
+            let start_idx = cursor as u32;
+            let available = total as u32 - start_idx;
+            let take_count = page_size.min(available);
+
+            let mut result = soroban_sdk::Vec::new(&env);
+            for i in 0..take_count {
+                if let Some(stream_id) = all_streams.get(start_idx + i) {
+                    result.push_back(stream_id);
+                }
+            }
+
+            result
+        }
     }
 
     /// Internal helper to require authorization from the stream sender.

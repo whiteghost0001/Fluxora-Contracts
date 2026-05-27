@@ -31,6 +31,9 @@ treasury tooling) can use this reference to handle protocol exceptions correctly
 | `TemplateUnauthorized` | 17 | Caller is not the template owner | `delete_stream_template` |
 | `SignatureDeadlineExpired` | 18 | Delegated-withdrawal signature deadline has passed | `delegated_withdraw_to` |
 | `InvalidSignature` | 19 | Delegated-withdrawal signature does not verify against the recipient's key | `delegated_withdraw_to` |
+| `InvalidDustThreshold` | 20 | `withdraw_dust_threshold` exceeds `deposit_amount` | `create_stream`, `create_streams`, `create_stream_from_template`, and relative variants |
+| `NoPendingRecipientUpdate` | 21 | No recipient update proposal exists for the given stream | `accept_recipient_update`, `cancel_recipient_update` |
+| `PendingRecipientUpdateExists` | 22 | A recipient update proposal is already pending for this stream | `update_recipient` |
 
 ---
 
@@ -612,6 +615,108 @@ match client.try_delete_stream_template(&template_id) {
     Err(e) => { /* handle other errors */ }
 }
 ```
+
+**Success Semantics**: Returns `()`.
+
+---
+
+### SignatureDeadlineExpired (18)
+
+**Definition**: The delegated-withdrawal signature deadline has passed.
+
+**Trigger Conditions**:
+- `deadline < env.ledger().timestamp()` in `delegated_withdraw_to`
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Recipient | Yes | If they sign a deadline that expires before submission |
+| Relayer | Yes | If they submit too late |
+
+**Client Action**:
+- Recipient should sign a new authorization with a later deadline.
+
+**Success Semantics**: Returns positive `i128` amount.
+
+---
+
+### InvalidSignature (19)
+
+**Definition**: The provided signature does not verify against the recipient's public key.
+
+**Trigger Conditions**:
+- Signature fails Ed25519 verification in `delegated_withdraw_to`
+- Signed message does not match current contract, stream_id, destination, or nonce
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Anyone | Yes | Malicious or malformed signature submission |
+
+**Client Action**:
+- Verify signature construction logic off-chain.
+- Ensure all parameters (nonce, contract_id, etc.) match exactly.
+
+**Success Semantics**: Returns positive `i128` amount.
+
+---
+
+### InvalidDustThreshold (20)
+
+**Definition**: `withdraw_dust_threshold` exceeds `deposit_amount`.
+
+**Trigger Conditions**:
+- `withdraw_dust_threshold > deposit_amount` during stream creation
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Sender | Yes | `create_stream`, `create_streams`, `create_stream_from_template`, and relative variants |
+
+**Client Action**:
+- Ensure `withdraw_dust_threshold <= deposit_amount`.
+- Usually, dust threshold is a small fraction of the deposit.
+
+**Success Semantics**: Returns `u64` stream_id.
+
+---
+
+### NoPendingRecipientUpdate (21)
+
+**Definition**: No recipient update proposal exists for the given stream ID.
+
+**Trigger Conditions**:
+- `accept_recipient_update` or `cancel_recipient_update` called when no proposal is pending in storage.
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Recipient | Yes | If they try to accept a proposal that doesn't exist or was already cancelled |
+| Sender | Yes | If they try to cancel a proposal that doesn't exist |
+
+**Client Action**:
+- Confirm the stream ID.
+- Check `get_pending_recipient_update` to verify if a proposal exists.
+
+**Success Semantics**: Returns `()`.
+
+---
+
+### PendingRecipientUpdateExists (22)
+
+**Definition**: A recipient update proposal is already pending for this stream.
+
+**Trigger Conditions**:
+- `update_recipient` called when a proposal already exists for the stream.
+
+**Affected Roles**:
+| Role | Can Trigger | Notes |
+|------|------------|-------|
+| Sender | Yes | If they try to propose a second rotation before the first is accepted/cancelled |
+
+**Client Action**:
+- Wait for the current recipient to accept.
+- Or call `cancel_recipient_update` first to clear the pending proposal.
 
 **Success Semantics**: Returns `()`.
 
