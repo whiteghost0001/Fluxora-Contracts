@@ -4,6 +4,7 @@ use fluxora_stream::{
     ContractError, CreateStreamParams, FluxoraStream, FluxoraStreamClient, PauseReason,
     StreamStatus,
 };
+use proptest::prelude::*;
 use soroban_sdk::log;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
@@ -19,6 +20,63 @@ struct TestContext<'a> {
     sender: Address,
     recipient: Address,
     token: TokenClient<'a>,
+}
+
+#[test]
+fn verify_error_doc_coverage() {
+    use std::fs;
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+    let path = std::path::Path::new(&manifest_dir).join("../../docs/error.md");
+    let error_md = fs::read_to_string(path).expect("Could not read docs/error.md");
+
+    // Check ContractError variants
+    let variants = [
+        "StreamNotFound",
+        "InvalidState",
+        "InvalidParams",
+        "ContractPaused",
+        "StartTimeInPast",
+        "ArithmeticOverflow",
+        "Unauthorized",
+        "AlreadyInitialised",
+        "InsufficientBalance",
+        "InsufficientDeposit",
+        "StreamAlreadyPaused",
+        "StreamNotPaused",
+        "StreamTerminalState",
+        "DuplicateStreamId",
+        "TemplateNotFound",
+        "TemplateLimitExceeded",
+        "TemplateUnauthorized",
+        "SignatureDeadlineExpired",
+        "InvalidSignature",
+    ];
+
+    for variant in variants {
+        assert!(
+            error_md.contains(variant),
+            "ContractError variant {} missing from docs/error.md",
+            variant
+        );
+    }
+
+    // Check FactoryError variants
+    let factory_variants = [
+        "AlreadyInitialized",
+        "NotInitialized",
+        "Unauthorized",
+        "RecipientNotAllowlisted",
+        "DepositExceedsCap",
+        "DurationTooShort",
+    ];
+
+    for variant in factory_variants {
+        assert!(
+            error_md.contains(variant),
+            "FactoryError variant {} missing from docs/error.md",
+            variant
+        );
+    }
 }
 
 impl<'a> TestContext<'a> {
@@ -4332,6 +4390,109 @@ fn snapshot_event_rate_end_topup_recp() {
 }
 
 #[test]
+fn update_rate_rejects_equal_and_zero_rates() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    let equal_rate_result = ctx
+        .client()
+        .try_update_rate_per_second(&stream_id, &1_i128);
+    assert_eq!(equal_rate_result, Err(Ok(ContractError::InvalidParams)));
+
+    let zero_rate_result = ctx
+        .client()
+        .try_update_rate_per_second(&stream_id, &0_i128);
+    assert_eq!(zero_rate_result, Err(Ok(ContractError::InvalidParams)));
+}
+
+#[test]
+fn update_rate_accepts_maximum_i128_rate() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &i128::MAX,
+        &1_i128,
+        &0u64,
+        &0u64,
+        &1u64,
+        &0,
+        &None,
+    );
+
+    ctx.client().update_rate_per_second(&stream_id, &i128::MAX);
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.rate_per_second, i128::MAX);
+    assert_eq!(state.status, StreamStatus::Active);
+}
+
+#[test]
+fn update_rate_on_paused_stream_is_allowed() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client()
+        .pause_stream(&stream_id, &PauseReason::Operational);
+    ctx.client().update_rate_per_second(&stream_id, &2_i128);
+
+    let state = ctx.client().get_stream_state(&stream_id);
+    assert_eq!(state.status, StreamStatus::Paused);
+    assert_eq!(state.rate_per_second, 2_i128);
+}
+
+#[test]
+fn update_rate_rejected_on_cancelled_stream() {
+    let ctx = TestContext::setup();
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.create_default_stream();
+
+    ctx.client().cancel_stream(&stream_id);
+    let result = ctx
+        .client()
+        .try_update_rate_per_second(&stream_id, &2_i128);
+    assert_eq!(result, Err(Ok(ContractError::InvalidState)));
+}
+
+proptest::proptest! {
+    #[test]
+    fn update_rate_accepts_monotonic_increase_sequences(
+        mut rates in proptest::collection::vec(1_i128..1000, 2..6)
+    ) {
+        rates.sort();
+        rates.dedup();
+        proptest::prop_assume!(rates.len() >= 2);
+
+        let ctx = TestContext::setup();
+        ctx.env.ledger().set_timestamp(0);
+
+        let duration = 10u64;
+        let deposit = rates.last().unwrap().checked_mul(duration as i128).unwrap();
+        let stream_id = ctx.client().create_stream(
+            &ctx.sender,
+            &ctx.recipient,
+            &deposit,
+            &rates[0],
+            &0u64,
+            &0u64,
+            &duration,
+            &0,
+            &None,
+        );
+
+        for &next_rate in rates.iter().skip(1) {
+            ctx.client().update_rate_per_second(&stream_id, &next_rate);
+            let state = ctx.client().get_stream_state(&stream_id);
+            proptest::prop_assert_eq!(state.rate_per_second, next_rate);
+            proptest::prop_assert!(state.status == StreamStatus::Active || state.status == StreamStatus::Paused);
+        }
+    }
+}
+
+#[test]
 fn snapshot_event_admin_and_pause_ctl() {
     let ctx = TestContext::setup();
 
@@ -4387,4 +4548,75 @@ fn snapshot_no_withdraw_event_when_amount_zero() {
     // Withdraw at t=0 (nothing accrued)
     ctx.client().withdraw(&stream_id);
     assert_eq!(ctx.env.events().all().len(), events_before);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #523: test_accrual_none_checkpoint_returns_zero
+//
+// Exercises the None-branch of CheckpointState lookup in
+// calculate_accrued_amount_checkpointed (accrual.rs line 31).
+//
+// A brand-new stream queried at exactly start_time has no prior checkpoint
+// epoch, so the function must return 0 without panicking.
+// Cross-check: when cliff_time > start_time the same call also returns 0.
+// ---------------------------------------------------------------------------
+
+/// Verifies that `calculate_accrued` returns 0 at exactly `start_time`
+/// for a freshly created stream (no checkpoint has been persisted yet).
+///
+/// This exercises the None-branch of the CheckpointState lookup in
+/// `calculate_accrued_amount_checkpointed` (accrual.rs line 31).
+#[test]
+fn test_accrual_none_checkpoint_returns_zero() {
+    let ctx = TestContext::setup();
+
+    // Stream: start=100, cliff=100, end=1100, rate=1/s, deposit=1000
+    // Queried at exactly start_time (t=100) — no checkpoint exists yet.
+    ctx.env.ledger().set_timestamp(100);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &100u64,
+        &100u64,
+        &1100u64,
+        &0,
+        &None,
+    );
+
+    // At start_time the elapsed seconds are 0 → accrued must be 0.
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(accrued, 0, "accrued at start_time must be 0 (no checkpoint)");
+}
+
+/// Same scenario but with cliff_time > start_time.
+///
+/// Querying before the cliff must also return 0, confirming the cliff guard
+/// fires before any checkpoint arithmetic is attempted.
+#[test]
+fn test_accrual_none_checkpoint_before_cliff_returns_zero() {
+    let ctx = TestContext::setup();
+
+    // Stream: start=0, cliff=500, end=1000, rate=1/s, deposit=1000
+    // Queried at t=0 (start_time, before cliff).
+    ctx.env.ledger().set_timestamp(0);
+    let stream_id = ctx.client().create_stream(
+        &ctx.sender,
+        &ctx.recipient,
+        &1000_i128,
+        &1_i128,
+        &0u64,
+        &500u64,
+        &1000u64,
+        &0,
+        &None,
+    );
+
+    // Before cliff → 0, regardless of checkpoint state.
+    let accrued = ctx.client().calculate_accrued(&stream_id);
+    assert_eq!(
+        accrued, 0,
+        "accrued before cliff must be 0 even with no checkpoint"
+    );
 }

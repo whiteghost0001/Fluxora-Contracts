@@ -686,6 +686,7 @@ A naive decrease would retroactively lower the recipient's accrued tokens. To pr
 - **Unauthorized**: Caller is not the stream sender.
 - **InvalidState**: Stream is `Completed` or `Cancelled`.
 - **InvalidParams**: `new_rate_per_second <= 0` or `new_rate_per_second <= old_rate`.
+  - This includes the boundary cases where the proposed rate is equal to the current rate or zero.
 - **InsufficientDeposit**: `deposit_amount < new_rate_per_second * (end_time - start_time)`.
 - **Atomicity**: Any failure reverts the entire transaction with no state changes or events.
 

@@ -124,6 +124,14 @@ pub enum StreamStatus {
     Completed = 2,
     Cancelled = 3,
 }
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PauseState {
+    Active = 0,
+    CreationPaused = 1,
+    GlobalEmergencyPaused = 2,
+}
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -409,6 +417,7 @@ pub struct ProtocolResumed {
 #[derive(Clone, Debug)]
 pub struct PauseInfo {
     pub is_paused: bool,
+    pub state: PauseState,
     pub reason: Option<soroban_sdk::String>,
     pub paused_at: Option<u64>,
     pub paused_by: Option<Address>,
@@ -590,14 +599,10 @@ pub enum DataKey {
     /// Per-recipient nonce counter for delegated-withdraw replay protection.
     /// Appended last to preserve existing discriminant values.
     WithdrawNonce(Address),
-    /// Paged recipient stream index entry.
-    /// Each page holds up to `MAX_RECIPIENT_PAGE_SIZE` stream IDs.
-    /// Appended after WithdrawNonce to preserve existing discriminants.
-    RecipientStreamPage(Address, u32),
-    /// Number of pages in a recipient's paged stream index.
-    RecipientStreamPageCount(Address),
-    /// Pending recipient update proposal for a stream (propose-and-accept pattern).
-    PendingRecipientUpdate(u64),
+    /// Current protocol-wide pause state (Active, CreationPaused, or GlobalEmergencyPaused).
+    PauseState,
+    /// Reentrancy guard flag (bool) to prevent recursive token transfers.
+    ReentrancyLock,
 }
 
 // ---------------------------------------------------------------------------
@@ -628,19 +633,21 @@ fn get_admin(env: &Env) -> Result<Address, ContractError> {
     get_config(env).map(|c| c.admin)
 }
 
-/// Returns whether the contract is in **global emergency pause** (default `false` if unset).
-fn is_global_emergency_paused(env: &Env) -> bool {
+/// Returns the current protocol-wide pause state.
+fn get_pause_state(env: &Env) -> PauseState {
     env.storage()
         .instance()
-        .get(&DataKey::GlobalEmergencyPaused)
-        .unwrap_or(false)
+        .get(&DataKey::PauseState)
+        .unwrap_or(PauseState::Active)
+}
+
+/// Returns whether the contract is in **global emergency pause**.
+fn is_global_emergency_paused(env: &Env) -> bool {
+    matches!(get_pause_state(env), PauseState::GlobalEmergencyPaused)
 }
 
 fn is_creation_paused(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::CreationPaused)
-        .unwrap_or(false)
+    matches!(get_pause_state(env), PauseState::CreationPaused)
 }
 
 /// Returns `Err(ContractError::ContractPaused)` when [`is_global_emergency_paused`] is true.
@@ -654,17 +661,30 @@ fn require_not_globally_paused(env: &Env) -> Result<(), ContractError> {
 
 /// Blocks new stream creation when the emergency pause or creation-only pause is active.
 fn require_not_creation_paused(env: &Env) -> Result<(), ContractError> {
-    require_not_globally_paused(env)?;
-    if is_creation_paused(env) {
-        return Err(ContractError::ContractPaused);
+    match get_pause_state(env) {
+        PauseState::GlobalEmergencyPaused | PauseState::CreationPaused => {
+            Err(ContractError::ContractPaused)
+        }
+        PauseState::Active => Ok(()),
     }
-    Ok(())
 }
 
 /// Returns whether the protocol is globally paused (checks both GlobalEmergencyPaused and CreationPaused).
 /// Default is false (not paused) if no pause keys are set.
 fn is_protocol_paused(env: &Env) -> bool {
-    is_global_emergency_paused(env) || is_creation_paused(env)
+    !matches!(get_pause_state(env), PauseState::Active)
+}
+
+macro_rules! require_not_globally_paused {
+    ($env:expr) => {
+        require_not_globally_paused(&$env)?;
+    };
+}
+
+macro_rules! require_creation_allowed {
+    ($env:expr) => {
+        require_not_creation_paused(&$env)?;
+    };
 }
 
 /// Get the stored pause reason, if any.
@@ -1254,6 +1274,59 @@ fn push_token(env: &Env, to: &Address, amount: i128) -> Result<(), ContractError
     let token_client = token::Client::new(env, &token_address);
     token_client.transfer(&env.current_contract_address(), to, &amount);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Reentrancy Guard Helpers
+// ---------------------------------------------------------------------------
+
+/// Acquire the reentrancy lock before a token transfer operation.
+///
+/// # Behavior
+/// - If the lock is already held, returns `Err(ContractError::InvalidState)` to prevent reentrancy.
+/// - If the lock is free, acquires it and returns `Ok(())`.
+///
+/// # Security Model
+/// - Prevents cross-contract callbacks from executing token transfers in the middle of
+///   another transfer, which could violate invariants even with CEI ordering.
+/// - Complements CEI pattern for defense-in-depth against malicious custom SEP-41 hooks.
+///
+/// # Usage
+/// Always pair with `release_reentrancy_lock` in a match statement:
+/// ```rust,ignore
+/// acquire_reentrancy_lock(&env)?;
+/// let result = do_token_transfer(&env);
+/// release_reentrancy_lock(&env);
+/// result?;
+/// ```
+fn acquire_reentrancy_lock(env: &Env) -> Result<(), ContractError> {
+    let is_locked: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::ReentrancyLock)
+        .unwrap_or(false);
+
+    if is_locked {
+        return Err(ContractError::InvalidState);
+    }
+
+    env.storage().instance().set(&DataKey::ReentrancyLock, &true);
+    bump_instance_ttl(env);
+    Ok(())
+}
+
+/// Release the reentrancy lock after a token transfer operation.
+///
+/// # Behavior
+/// - Clears the reentrancy lock flag.
+/// - Should only be called after `acquire_reentrancy_lock` returns Ok.
+///
+/// # Panic Safety
+/// - Even if the transfer panics, the lock is released on function exit (not auto-release due to transaction rollback).
+/// - Since transactions are atomic, a panic will rollback the lock flag anyway.
+fn release_reentrancy_lock(env: &Env) {
+    env.storage().instance().set(&DataKey::ReentrancyLock, &false);
+    bump_instance_ttl(env);
 }
 
 // ---------------------------------------------------------------------------
@@ -2268,7 +2341,11 @@ impl FluxoraStream {
             .unwrap_or(0);
         write_total_liabilities(&env, liabilities);
 
-        push_token(&env, &stream.recipient, withdrawable)?;
+        // Explicit reentrancy guard for token transfer path
+        acquire_reentrancy_lock(&env)?;
+        let transfer_result = push_token(&env, &stream.recipient, withdrawable);
+        release_reentrancy_lock(&env);
+        transfer_result?;
 
         env.events().publish(
             (symbol_short!("withdrew"), stream_id),
@@ -2403,7 +2480,11 @@ impl FluxoraStream {
             .unwrap_or(0);
         write_total_liabilities(&env, liabilities);
 
-        push_token(&env, &destination, withdrawable)?;
+        // Explicit reentrancy guard for token transfer path
+        acquire_reentrancy_lock(&env)?;
+        let transfer_result = push_token(&env, &destination, withdrawable);
+        release_reentrancy_lock(&env);
+        transfer_result?;
 
         env.events().publish(
             (symbol_short!("wdraw_to"), stream_id),
@@ -2687,7 +2768,11 @@ impl FluxoraStream {
                     .unwrap_or(0);
                 write_total_liabilities(&env, liabilities);
 
-                push_token(&env, &stream.recipient, withdrawable)?;
+                // Explicit reentrancy guard for token transfer path
+                acquire_reentrancy_lock(&env)?;
+                let transfer_result = push_token(&env, &stream.recipient, withdrawable);
+                release_reentrancy_lock(&env);
+                transfer_result?;
 
                 env.events().publish(
                     (symbol_short!("withdrew"), stream_id),
@@ -4225,7 +4310,12 @@ impl FluxoraStream {
                 .checked_sub(refund_amount)
                 .unwrap_or(0);
             write_total_liabilities(env, liabilities);
-            push_token(env, &stream.sender, refund_amount)?;
+
+            // Explicit reentrancy guard for token transfer path
+            acquire_reentrancy_lock(env)?;
+            let transfer_result = push_token(env, &stream.sender, refund_amount);
+            release_reentrancy_lock(env);
+            transfer_result?;
         }
 
         env.events().publish(
@@ -4658,9 +4748,13 @@ impl FluxoraStream {
         let admin = get_admin(&env).unwrap();
         admin.require_auth();
 
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &paused);
+        let state = if paused {
+            PauseState::GlobalEmergencyPaused
+        } else {
+            PauseState::Active
+        };
+
+        env.storage().instance().set(&DataKey::PauseState, &state);
         bump_instance_ttl(&env);
 
         env.events().publish(
@@ -4684,7 +4778,7 @@ impl FluxoraStream {
     ///   emergency pause (prevents spurious resume events and double-resume confusion).
     ///
     /// # State Changes
-    /// - Clears `DataKey::GlobalEmergencyPaused` (sets it to `false`).
+    /// - Clears `DataKey::PauseState` (sets it to `Active`).
     /// - All user-facing mutations that were blocked by the emergency pause are immediately
     ///   re-enabled: `create_stream`, `create_streams`, `withdraw`, `withdraw_to`,
     ///   `batch_withdraw`, `cancel_stream`, `update_rate_per_second`,
@@ -4711,7 +4805,7 @@ impl FluxoraStream {
 
         env.storage()
             .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &false);
+            .set(&DataKey::PauseState, &PauseState::Active);
         bump_instance_ttl(&env);
 
         env.events().publish(
@@ -4739,9 +4833,13 @@ impl FluxoraStream {
     pub fn set_contract_paused(env: Env, paused: bool) -> Result<(), ContractError> {
         get_admin(&env)?.require_auth();
 
-        env.storage()
-            .instance()
-            .set(&DataKey::CreationPaused, &paused);
+        let state = if paused {
+            PauseState::CreationPaused
+        } else {
+            PauseState::Active
+        };
+
+        env.storage().instance().set(&DataKey::PauseState, &state);
         bump_instance_ttl(&env);
 
         env.events().publish(
@@ -4788,10 +4886,10 @@ impl FluxoraStream {
             return Ok(());
         }
 
-        // Set the global emergency pause flag
+        // Set the global emergency pause state
         env.storage()
             .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &true);
+            .set(&DataKey::PauseState, &PauseState::GlobalEmergencyPaused);
 
         // Store audit trail information
         let reason_str = reason.unwrap_or_else(|| soroban_sdk::String::from_str(&env, ""));
@@ -4856,7 +4954,7 @@ impl FluxoraStream {
         // Clear all pause-related storage
         env.storage()
             .instance()
-            .set(&DataKey::GlobalEmergencyPaused, &false);
+            .set(&DataKey::PauseState, &PauseState::Active);
         env.storage().instance().remove(&DataKey::GlobalPauseReason);
         env.storage()
             .instance()
@@ -4896,10 +4994,12 @@ impl FluxoraStream {
     /// - `PauseInfo` struct with `is_paused`, `reason`, `paused_at`, `paused_by` fields.
     /// - All optional fields are `None` when not paused.
     pub fn get_pause_info(env: Env) -> PauseInfo {
-        let is_paused = is_protocol_paused(&env);
+        let state = get_pause_state(&env);
+        let is_paused = !matches!(state, PauseState::Active);
         if is_paused {
             PauseInfo {
                 is_paused: true,
+                state,
                 reason: get_pause_reason(&env),
                 paused_at: get_pause_timestamp(&env),
                 paused_by: get_pause_admin(&env),
@@ -4907,6 +5007,7 @@ impl FluxoraStream {
         } else {
             PauseInfo {
                 is_paused: false,
+                state: PauseState::Active,
                 reason: None,
                 paused_at: None,
                 paused_by: None,
