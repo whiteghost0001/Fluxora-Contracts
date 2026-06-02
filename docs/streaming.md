@@ -16,7 +16,7 @@ When changing the contract:
 - Update snapshot tests if externally visible behavior changes
 - No behavior change required for doc-only updates
 
-**Entrypoint index (validator):** `batch_withdraw_to`, `clone_stream`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`.
+**Entrypoint index (validator):** `batch_withdraw_to`, `delete_stream_template`, `get_global_emergency_paused`, `get_recipient_stream_count`, `get_stream_health`, `get_stream_memo`, `get_stream_template`, `global_resume`, `set_contract_paused`, `set_global_emergency_paused`, `version`, `migration_v5_to_v6`, `set_max_rate_per_second`.
 
 ## Externally Visible Assurances
 
@@ -88,6 +88,16 @@ From **CONTRACT_VERSION 3**, integrators can register **relative** schedule skel
 - **Auth**: registering and deleting templates requires the template `owner` signer. Creating a stream from a template requires the **funding `sender`** to authorize (same as `create_stream_relative`).
 - **Caps**: per-owner and global template counts are bounded; see `MAX_TEMPLATES_PER_OWNER` and `MAX_GLOBAL_TEMPLATES` in `contracts/stream/src/lib.rs`.
 - **Errors**: `TemplateNotFound`, `TemplateLimitExceeded`, `TemplateUnauthorized`.
+
+### Stream Kinds (Linear vs. Cliff-Only)
+
+From **CONTRACT_VERSION 4**, the contract supports distinct streaming styles, governed by the `StreamKind` field on the stream configuration:
+
+- **Linear** (Default/Legacy): Accrues tokens continuously and linearly over time at `rate_per_second` once the stream has started, subject to a standard cliff window (during which nothing can be withdrawn).
+- **[CliffOnly](#cliff-only-streams)**: A one-shot, instant unlock stream variant. Tokens do not accrue continuously over time. Instead:
+  - Before the `cliff_time`, `0` tokens are accrued/withdrawable (all funds are locked).
+  - At or after the `cliff_time`, the total `deposit_amount` is immediately and fully unlocked and made claimable by the recipient.
+  - To enforce the single-unlock model, `rate_per_second` is forced to `0` during creation and all subsequent mutation/adjustment requests are rejected.
 
 ---
 
@@ -306,6 +316,9 @@ sequenceDiagram
 
 **Location:** `contracts/stream/src/accrual.rs`
 
+The mathematical accrual behavior branches on the stream's `StreamKind`:
+
+### Linear Streams
 ```text
 if current_time < cliff_time           → return 0
 if start_time >= end_time or rate < 0  → return 0
@@ -314,6 +327,12 @@ elapsed_now = min(current_time, end_time)
 elapsed_seconds = elapsed_now - start_time   // 0 if underflow
 accrued = elapsed_seconds * rate_per_second  // on overflow → deposit_amount
 return min(accrued, deposit_amount).max(0)
+```
+
+### Cliff-Only Streams
+```text
+if current_time < cliff_time  → return 0
+else                         → return deposit_amount
 ```
 
 ### Rules
@@ -426,6 +445,18 @@ deposit_amount >= rate_per_second * (new_end_time - start_time)
 ```
 
 If the existing deposit does not cover the extended duration, `extend_stream_end_time` returns `ContractError::InsufficientDeposit` and no state changes occur. Use `top_up_stream` first to increase the deposit, then extend.
+
+### Mutation Restrictions on Cliff-Only Streams
+
+To preserve the absolute one-shot unlock nature of a `[CliffOnly](#cliff-only-streams)` stream variant and guarantee its immutability post-creation, **all mutating endpoints are strictly blocked**. Attempting to call any of the following functions on a `[CliffOnly](#cliff-only-streams)` stream will return `[ContractError::UnsupportedStreamKind](./error.md#unsupportedstreamkind-17)` and revert all state changes:
+
+- `top_up_stream`
+- `update_rate_per_second`
+- `decrease_rate_per_second`
+- `shorten_stream_end_time`
+- `extend_stream_end_time`
+
+Any such attempt is atomic: no balances are transferred, no state is updated, and no events are emitted.
 
 ### Shorten `end_time` Semantics
 
@@ -924,7 +955,7 @@ Pre-flight check query that returns the auto-claim configuration status and clai
   - `ValidDestination { destination, claimable }`: Destination is set and valid, with the current claimable amount.
   - `InvalidDestination { destination }`: Destination is set but invalid (zero address or contract itself).
 - **Claimable calculation**: Computed as `accrued_amount - withdrawn_amount` at current timestamp, capped at 0.
-- **Validation checks**: 
+- **Validation checks**:
   - Destination is not the zero address
   - Destination is not the contract address itself
 - **Usage pattern**:
@@ -1133,6 +1164,7 @@ errors relevant to stream creation and timing.
 | `ContractError::StreamNotPaused` (11)                                   | `resume_stream`                    | Resume active stream                          |
 | `ContractError::StreamTerminalState` (12)                               | `pause_stream` / `resume_stream`   | Modification past end_time                    |
 | `ContractError::StreamNotFound` (1)                                     | Various                            | Invalid stream_id                             |
+| `[ContractError::UnsupportedStreamKind](./error.md#unsupportedstreamkind-17)` (17) | Mutating functions                 | Attempting to mutate a [CliffOnly](#cliff-only-streams) stream       |
 | `ContractError::Unauthorized` (6)                                       | Various                            | Auth check failed                             |
 | `ContractError::InvalidState` (2)                                       | `withdraw`                         | Withdraw from non-terminal paused             |
 | `ContractError::InvalidState` (2)                                       | `cancel_stream`                    | Cancel completed/cancelled                    |

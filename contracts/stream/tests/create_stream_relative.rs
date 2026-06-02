@@ -76,6 +76,7 @@ fn create_stream_relative_zero_delays_immediate_start() {
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -107,6 +108,7 @@ fn create_stream_relative_positive_delays_future_start() {
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 4000,
@@ -135,6 +137,7 @@ fn create_stream_relative_zero_duration_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -160,6 +163,7 @@ fn create_stream_relative_cliff_less_than_start_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -186,6 +190,7 @@ fn create_stream_relative_cliff_greater_than_end_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -211,6 +216,7 @@ fn create_stream_relative_start_delay_overflow_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -236,6 +242,7 @@ fn create_stream_relative_duration_overflow_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -262,6 +269,7 @@ fn create_stream_relative_never_start_time_in_past() {
     let stream_id = ctx.client().create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -293,6 +301,7 @@ fn create_stream_relative_insufficient_deposit_rejected() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 500,
@@ -317,6 +326,7 @@ fn create_stream_relative_rejects_self_stream() {
     let result = ctx.client().try_create_stream_relative(
         &ctx.sender,
         &CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.sender.clone(),
             deposit_amount: 1000,
@@ -345,6 +355,7 @@ fn create_streams_relative_single_entry() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -377,6 +388,7 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -388,6 +400,7 @@ fn create_streams_relative_multiple_entries_sequential_ids() {
             metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: recipient2.clone(),
             deposit_amount: 4000, // 2 * 2000
@@ -446,6 +459,7 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
@@ -457,6 +471,7 @@ fn create_streams_relative_invalid_entry_fails_atomically() {
             metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: recipient2.clone(),
             deposit_amount: 500,
@@ -492,6 +507,7 @@ fn create_streams_relative_diverse_schedules() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r1,
             deposit_amount: 100,
@@ -503,6 +519,7 @@ fn create_streams_relative_diverse_schedules() {
             metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r2,
             deposit_amount: 400, // 2 * 200
@@ -514,6 +531,7 @@ fn create_streams_relative_diverse_schedules() {
             metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r3,
             deposit_amount: 900, // 3 * 300
@@ -561,6 +579,7 @@ fn create_streams_relative_independent_cliff_times() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r1,
             deposit_amount: 1000,
@@ -572,6 +591,7 @@ fn create_streams_relative_independent_cliff_times() {
             metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r2,
             deposit_amount: 2000,
@@ -606,6 +626,7 @@ fn create_streams_relative_batch_overflow_detection() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r1,
             deposit_amount: 1000,
@@ -636,6 +657,7 @@ fn create_streams_relative_batch_validates_amounts() {
     let params = vec![
         &ctx.env,
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r1,
             deposit_amount: 1000,
@@ -647,6 +669,7 @@ fn create_streams_relative_batch_validates_amounts() {
             metadata: None,
         },
         CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
             withdraw_dust_threshold: None,
             recipient: r2,
             deposit_amount: -100, // Invalid: negative amount

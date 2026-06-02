@@ -169,8 +169,8 @@ fn event_snapshot_stream_created_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     let events = ctx.env.events().all();
     assert!(
@@ -233,17 +233,8 @@ fn event_snapshot_stream_created_with_memo() {
     let memo = Some(soroban_sdk::Bytes::from_slice(&ctx.env, b"payroll-2024-q1"));
     let events_before = ctx.env.events().all().len();
 
-    let _stream_id = ctx.client().create_stream(
-        &ctx.sender,
-        &ctx.recipient,
-        &5000_i128,
-        &2_i128,
-        &0u64,
-        &100u64,
-        &2500u64,
-        &0,
-        &memo,
-    );
+    let _stream_id = ctx.client().create_stream(&ctx.sender, &ctx.recipient, &5000_i128, &2_i128, &0u64, &100u64, &2500u64, &0, &memo, &fluxora_stream::StreamKind::Linear);
+
 
     let events = ctx.env.events().all();
     let mut found = false;
@@ -295,8 +286,8 @@ fn event_snapshot_withdrawal_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     ctx.env.ledger().set_timestamp(500);
     let events_before = ctx.env.events().all().len();
@@ -355,8 +346,8 @@ fn event_snapshot_no_withdrawal_event_when_amount_zero() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Try to withdraw before cliff - amount should be 0
     ctx.env.ledger().set_timestamp(100);
@@ -402,8 +393,8 @@ fn event_snapshot_withdrawal_to_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     let destination = Address::generate(&ctx.env);
     ctx.env.ledger().set_timestamp(400);
@@ -467,8 +458,8 @@ fn event_snapshot_stream_paused_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     let events_before = ctx.env.events().all().len();
     ctx.client()
@@ -523,8 +514,8 @@ fn event_snapshot_stream_paused_as_admin_has_administrative_reason() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     let events_before = ctx.env.events().all().len();
     ctx.client()
@@ -573,8 +564,8 @@ fn event_snapshot_stream_resumed_has_correct_topics() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     ctx.client()
         .pause_stream(&stream_id, &PauseReason::Operational);
@@ -619,8 +610,8 @@ fn event_snapshot_stream_cancelled_has_correct_topics() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     ctx.env.ledger().set_timestamp(500);
     let events_before = ctx.env.events().all().len();
@@ -667,8 +658,8 @@ fn event_snapshot_stream_completed_emitted_after_withdrew() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Partial withdrawal first
     ctx.env.ledger().set_timestamp(300);
@@ -721,8 +712,8 @@ fn event_snapshot_stream_closed_has_correct_topics() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Complete the stream
     ctx.env.ledger().set_timestamp(1000);
@@ -773,8 +764,8 @@ fn event_snapshot_rate_updated_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     ctx.env.ledger().set_timestamp(100);
     let events_before = ctx.env.events().all().len();
@@ -832,8 +823,8 @@ fn event_snapshot_stream_end_shortened_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     let events_before = ctx.env.events().all().len();
     ctx.client().shorten_stream_end_time(&stream_id, &500u64);
@@ -890,8 +881,8 @@ fn event_snapshot_stream_end_extended_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     let events_before = ctx.env.events().all().len();
     ctx.client().extend_stream_end_time(&stream_id, &2000u64);
@@ -950,8 +941,8 @@ fn event_snapshot_stream_topped_up_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     let events_before = ctx.env.events().all().len();
     ctx.client()
@@ -1007,8 +998,8 @@ fn event_snapshot_recipient_updated_has_correct_topics_and_payload() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     let new_recipient = Address::generate(&ctx.env);
     let events_before = ctx.env.events().all().len();
@@ -1194,8 +1185,8 @@ fn event_snapshot_no_events_on_failed_create_stream() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     assert!(
         result.is_err(),
@@ -1239,8 +1230,8 @@ fn event_snapshot_no_events_on_failed_operations() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Try to pause an already completed stream (should fail)
     ctx.env.ledger().set_timestamp(1000);
@@ -1332,8 +1323,8 @@ fn event_snapshot_health_changed_top_up_heals_underfunded_stream() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Advance to t=100.
     ctx.env.ledger().set_timestamp(100);
@@ -1374,8 +1365,8 @@ fn event_snapshot_health_changed_shorten_heals_underfunded_stream() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Advance to t=100.
     ctx.env.ledger().set_timestamp(100);
@@ -1416,8 +1407,8 @@ fn event_snapshot_health_changed_decrease_rate_heals_underfunded_stream() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Advance to t=100.
     ctx.env.ledger().set_timestamp(100);
@@ -1460,8 +1451,8 @@ fn event_snapshot_health_changed_cancel_heals_underfunded_stream() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Advance to t=100.
     ctx.env.ledger().set_timestamp(100);
@@ -1502,8 +1493,8 @@ fn event_snapshot_health_changed_not_emitted_when_no_transition() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Top up an already-funded stream. Health stays funded → no event.
     let events_before = ctx.env.events().all().len();

@@ -64,8 +64,8 @@ impl TestContext {
             &1000,
             &0,
             &None,
-            &None,
-        )
+            &fluxora_stream::StreamKind::Linear,
+            )
     }
 }
 
@@ -136,8 +136,8 @@ fn test_create_stream_respects_max_rate() {
         &1000,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 }
 
@@ -164,13 +164,8 @@ fn test_update_rate_per_second_respects_max_rate() {
     let events = ctx.env.events().all();
     assert_eq!(events.len(), events_before + 1);
 
-    let rate_cap_event = events
-        .iter()
-        .find(|e| e.0 == (symbol_short!("rate_cap"), stream_id));
-    assert!(
-        rate_cap_event.is_some(),
-        "RateCapEnforced event must be emitted"
-    );
+    let rate_cap_event = events.iter().find(|e| e.0 == (symbol_short!("rate_cap"), stream_id));
+    assert!(rate_cap_event.is_some(), "RateCapEnforced event must be emitted");
 
     if let Some(event) = rate_cap_event {
         let rate_cap_enforced = RateCapEnforced::try_from_val(&ctx.env, &event.1)
@@ -197,8 +192,8 @@ fn test_default_max_rate_is_unlimited() {
         &1, // 1 second duration to avoid overflow
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     assert!(result.is_ok(), "High rates should be allowed by default");
 }
 
@@ -213,6 +208,7 @@ fn test_max_rate_applies_to_all_create_functions() {
     let params = vec![
         &ctx.env,
         fluxora_stream::CreateStreamParams {
+        kind: fluxora_stream::StreamKind::Linear,
             recipient: ctx.recipient.clone(),
             deposit_amount: 1000,
             rate_per_second: 101, // Exceeds max
@@ -230,6 +226,7 @@ fn test_max_rate_applies_to_all_create_functions() {
 
     // Test create_stream_relative
     let relative_params = fluxora_stream::CreateStreamRelativeParams {
+        kind: fluxora_stream::StreamKind::Linear,
         recipient: ctx.recipient.clone(),
         deposit_amount: 1000,
         rate_per_second: 101, // Exceeds max
@@ -267,8 +264,8 @@ fn test_max_rate_boundary_conditions() {
         &1000,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
 
     // Test with max rate = i128::MAX
@@ -286,8 +283,8 @@ fn test_max_rate_boundary_conditions() {
         &1,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     assert!(result.is_ok());
 }
 
@@ -333,8 +330,8 @@ fn test_rate_cap_with_arithmetic_overflow_protection() {
         &i64::MAX as u64, // Very long duration
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     
     // Should fail with InvalidParams (overflow or rate cap violation)
     assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
@@ -359,10 +356,7 @@ fn test_multiple_rate_cap_enforced_events() {
 
     // Should have two RateCapEnforced events
     let events = ctx.env.events().all();
-    let rate_cap_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.0 .0 == symbol_short!("rate_cap"))
-        .collect();
+    let rate_cap_events: Vec<_> = events.iter().filter(|e| e.0.0 == symbol_short!("rate_cap")).collect();
 
     assert_eq!(rate_cap_events.len(), 2);
 

@@ -53,7 +53,7 @@ impl<'a> Ctx<'a> {
             end_time: now + duration,
             withdraw_dust_threshold: None,
             memo: None,
-            metadata: None,
+            kind: fluxora_stream::StreamKind::Linear,
         }
     }
 }
@@ -129,8 +129,8 @@ fn test_batch_index_matches_sequential_creation() {
         &p1.end_time,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     ctx1.client.create_stream(
         &ctx1.sender,
         &p2.recipient,
@@ -141,8 +141,8 @@ fn test_batch_index_matches_sequential_creation() {
         &p2.end_time,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     let seq_index = ctx1.client.get_recipient_streams(&recipient1, &None, &None);
 
     // Batch: create both streams in one call

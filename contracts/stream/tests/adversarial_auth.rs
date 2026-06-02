@@ -124,8 +124,8 @@ impl<'a> Ctx<'a> {
             &1000u64,
             &0,
             &None,
-            &None,
-        )
+            &fluxora_stream::StreamKind::Linear,
+            )
     }
 
     /// Pause a stream as the sender (helper to reach Paused state).
@@ -1093,8 +1093,8 @@ mod delegated_withdraw_adversarial {
                 &1000u64,
                 &0,
                 &None,
-                &None,
-            )
+                &fluxora_stream::StreamKind::Linear,
+                )
         }
 
         fn sign(&self, stream_id: u64, dest: &Address, nonce: u64, deadline: u64) -> BytesN<64> {
@@ -1127,6 +1127,7 @@ mod delegated_withdraw_adversarial {
             &dest,
             &0,
             &deadline,
+            &0i128,
             &sig,
         );
         assert_eq!(result, Err(Ok(ContractError::SignatureDeadlineExpired)));
@@ -1142,14 +1143,27 @@ mod delegated_withdraw_adversarial {
         // First withdrawal consumes nonce 0.
         ctx.env.ledger().set_timestamp(300);
         let sig0 = ctx.sign(stream_id, &dest, 0, 9999);
-        ctx.client()
-            .delegated_withdraw(&stream_id, &ctx.relayer, &dest, &0, &9999, &sig0);
+        ctx.client().delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &0,
+            &9999,
+            &0i128,
+            &sig0,
+        );
 
         // Replay with nonce 0 must fail.
         ctx.env.ledger().set_timestamp(600);
-        let result =
-            ctx.client()
-                .try_delegated_withdraw(&stream_id, &ctx.relayer, &dest, &0, &9999, &sig0);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &0,
+            &9999,
+            &0i128,
+            &sig0,
+        );
         assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
     }
 
@@ -1162,9 +1176,15 @@ mod delegated_withdraw_adversarial {
 
         ctx.env.ledger().set_timestamp(300);
         let sig = ctx.sign(stream_id, &dest, 1, 9999); // nonce 1 but stored is 0
-        let result =
-            ctx.client()
-                .try_delegated_withdraw(&stream_id, &ctx.relayer, &dest, &1, &9999, &sig);
+        let result = ctx.client().try_delegated_withdraw(
+            &stream_id,
+            &ctx.relayer,
+            &dest,
+            &1,
+            &9999,
+            &0i128,
+            &sig,
+        );
         assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
     }
 
@@ -1182,6 +1202,7 @@ mod delegated_withdraw_adversarial {
             &dest,
             &0,
             &9999,
+            &0i128,
             &dummy_sig,
         );
         assert_eq!(result, Err(Ok(ContractError::StreamNotFound)));
@@ -1196,9 +1217,7 @@ mod delegated_withdraw_adversarial {
 
         let dest = ctx.contract_id.clone();
         let sig = ctx.sign(stream_id, &dest, 0, 9999);
-        let result =
-            ctx.client()
-                .try_delegated_withdraw(&stream_id, &ctx.relayer, &dest, &0, &9999, &sig);
+        let result = ctx.client().try_delegated_withdraw(&stream_id, &ctx.relayer, &dest, &0, &9999, &0i128, &sig);
         assert_eq!(result, Err(Ok(ContractError::InvalidParams)));
     }
 
@@ -1226,9 +1245,7 @@ mod delegated_withdraw_adversarial {
         ctx.env.mock_all_auths();
         ctx.env.ledger().set_timestamp(300);
         let sig = ctx.sign(stream_id, &dest, 0, 9999);
-        let result =
-            ctx.client()
-                .try_delegated_withdraw(&stream_id, &ctx.relayer, &dest, &0, &9999, &sig);
+        let result = ctx.client().try_delegated_withdraw(&stream_id, &ctx.relayer, &dest, &0, &9999, &0i128, &sig);
         assert_eq!(result, Err(Ok(ContractError::InvalidState)));
     }
 
@@ -1242,14 +1259,11 @@ mod delegated_withdraw_adversarial {
         // Drain the stream to Completed.
         ctx.env.ledger().set_timestamp(1000);
         let sig0 = ctx.sign(stream_id, &dest, 0, 9999);
-        ctx.client()
-            .delegated_withdraw(&stream_id, &ctx.relayer, &dest, &0, &9999, &sig0);
+        ctx.client().delegated_withdraw(&stream_id, &ctx.relayer, &dest, &0, &9999, &0i128, &sig0);
 
         // Second attempt on a Completed stream must fail.
         let sig1 = ctx.sign(stream_id, &dest, 1, 9999);
-        let result =
-            ctx.client()
-                .try_delegated_withdraw(&stream_id, &ctx.relayer, &dest, &1, &9999, &sig1);
+        let result = ctx.client().try_delegated_withdraw(&stream_id, &ctx.relayer, &dest, &1, &9999, &0i128, &sig1);
         assert_eq!(result, Err(Ok(ContractError::InvalidState)));
     }
 }
@@ -1288,15 +1302,8 @@ fn delegated_withdraw_expired_deadline_rejected() {
     let fake_key = soroban_sdk::Bytes::from_array(&ctx.env, &[0u8; 32]);
     let fake_sig = soroban_sdk::Bytes::from_array(&ctx.env, &[0u8; 64]);
 
-    let result = ctx.client().try_delegated_withdraw(
-        &stream_id,
-        &relayer,
-        &fake_key,
-        &0u64,
-        &500u64, // deadline in the past
-        &0i128,
-        &fake_sig,
-    );
+    // deadline in the past
+    let result = ctx.client().try_delegated_withdraw(&stream_id, &relayer, &fake_key, &0u64, &500u64, &0i128, &fake_sig);
 
     assert_eq!(
         result,
@@ -1317,15 +1324,8 @@ fn delegated_withdraw_wrong_nonce_rejected() {
     let fake_sig = soroban_sdk::Bytes::from_array(&ctx.env, &[0u8; 64]);
 
     // Stored nonce is 0; supply nonce=1 (wrong)
-    let result = ctx.client().try_delegated_withdraw(
-        &stream_id,
-        &relayer,
-        &fake_key,
-        &1u64, // wrong nonce
-        &9999u64,
-        &0i128,
-        &fake_sig,
-    );
+    // wrong nonce
+    let result = ctx.client().try_delegated_withdraw(&stream_id, &relayer, &fake_key, &1u64, &9999u64, &0i128, &fake_sig);
 
     assert_eq!(
         result,
@@ -1357,15 +1357,7 @@ fn delegated_withdraw_below_minimum_rejected() {
 
     let relayer = Address::generate(&ctx.env);
 
-    let result = ctx.client().try_delegated_withdraw(
-        &stream_id,
-        &relayer,
-        &pub_key,
-        &nonce,
-        &deadline,
-        &expected_minimum,
-        &sig,
-    );
+    let result = ctx.client().try_delegated_withdraw(&stream_id, &relayer, &pub_key, &nonce, &deadline, &expected_minimum, &sig);
 
     assert_eq!(
         result,
@@ -1400,21 +1392,12 @@ fn delegated_withdraw_nonce_increments_preventing_replay() {
     let relayer = Address::generate(&ctx.env);
 
     // First call succeeds
-    let amount = ctx
-        .client()
-        .delegated_withdraw(&stream_id, &relayer, &pub_key, &nonce, &deadline, &min_amount, &sig);
+    let amount = ctx.client().delegated_withdraw(&stream_id, &relayer, &pub_key, &nonce, &deadline, &min_amount, &sig);
     assert!(amount > 0, "first delegated_withdraw must transfer tokens");
 
     // Nonce is now 1; replaying nonce=0 must fail
-    let replay = ctx.client().try_delegated_withdraw(
-        &stream_id,
-        &relayer,
-        &pub_key,
-        &nonce, // stale nonce
-        &deadline,
-        &min_amount,
-        &sig,
-    );
+    // stale nonce
+    let replay = ctx.client().try_delegated_withdraw(&stream_id, &relayer, &pub_key, &nonce, &deadline, &min_amount, &sig);
     assert_eq!(
         replay,
         Err(Ok(fluxora_stream::ContractError::InvalidSignature)),

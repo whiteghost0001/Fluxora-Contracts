@@ -174,9 +174,9 @@ fn sweep_excess_after_rate_decrease() {
         &100u64,
         &0,
         &None,
-        &None,
-    );
-
+        &fluxora_stream::StreamKind::Linear,
+        );
+    
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
 
     // Decrease rate at t=50 from 10/s to 5/s
@@ -317,9 +317,9 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
-
+        &fluxora_stream::StreamKind::Linear,
+        );
+    
     // Create second stream: 2000 tokens
     let recipient_2 = Address::generate(&ctx.env);
     let stream_id_2 = ctx.client().create_stream(
@@ -332,9 +332,9 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
-
+        &fluxora_stream::StreamKind::Linear,
+        );
+    
     // Contract has 3000 tokens, 3000 liabilities
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3_000);
 
@@ -468,8 +468,8 @@ fn get_stream_health_returns_correct_summary_underfunded() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     ctx.env.ledger().set_timestamp(300);
     let health = ctx.client().get_stream_health(&stream_id);
@@ -524,8 +524,7 @@ fn snapshot_event_paused_resumed_cancelled() {
     let stream_id = ctx.create_default_stream();
 
     // 1. paused
-    ctx.client()
-        .pause_stream(&stream_id, &PauseReason::Operational);
+    ctx.client().pause_stream(&stream_id, &PauseReason::Operational);
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
@@ -580,8 +579,8 @@ fn snapshot_event_rate_end_topup_recp() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // 1. rate_upd
     ctx.client().update_rate_per_second(&stream_id, &2_i128);
@@ -602,8 +601,7 @@ fn snapshot_event_rate_end_topup_recp() {
     );
 
     // 3. top_up — refill the deposit so we can subsequently extend the schedule.
-    ctx.client()
-        .top_up_stream(&stream_id, &ctx.sender, &1000_i128);
+    ctx.client().top_up_stream(&stream_id, &ctx.sender, &1000_i128);
     let events = ctx.env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
@@ -659,8 +657,8 @@ fn update_rate_accepts_maximum_i128_rate() {
         &1u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     ctx.client().update_rate_per_second(&stream_id, &i128::MAX);
     let state = ctx.client().get_stream_state(&stream_id);
@@ -674,8 +672,7 @@ fn update_rate_on_paused_stream_is_allowed() {
     ctx.env.ledger().set_timestamp(0);
     let stream_id = ctx.create_default_stream();
 
-    ctx.client()
-        .pause_stream(&stream_id, &PauseReason::Operational);
+    ctx.client().pause_stream(&stream_id, &PauseReason::Operational);
     ctx.client().update_rate_per_second(&stream_id, &2_i128);
 
     let state = ctx.client().get_stream_state(&stream_id);
@@ -718,8 +715,8 @@ proptest::proptest! {
             &duration,
             &0,
             &None,
-            &None,
-        );
+            &fluxora_stream::StreamKind::Linear,
+            );
 
         for &next_rate in rates.iter().skip(1) {
             ctx.client().update_rate_per_second(&stream_id, &next_rate);
@@ -771,8 +768,8 @@ fn snapshot_no_event_on_revert() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     assert!(result.is_err());
     assert_eq!(ctx.env.events().all().len(), events_before);
 }
@@ -822,8 +819,8 @@ fn test_accrual_none_checkpoint_returns_zero() {
         &1100u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // At start_time the elapsed seconds are 0 → accrued must be 0.
     let accrued = ctx.client().calculate_accrued(&stream_id);
@@ -854,8 +851,8 @@ fn test_accrual_none_checkpoint_before_cliff_returns_zero() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
 
     // Before cliff → 0, regardless of checkpoint state.
     let accrued = ctx.client().calculate_accrued(&stream_id);
@@ -937,8 +934,8 @@ fn sweep_excess_after_rate_decrease() {
         &100u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     
     assert_eq!(ctx.token.balance(&ctx.contract_id), 1_000);
     
@@ -1080,8 +1077,8 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     
     // Create second stream: 2000 tokens
     let recipient_2 = Address::generate(&ctx.env);
@@ -1095,8 +1092,8 @@ fn sweep_excess_with_multiple_streams_complex_scenario() {
         &1000u64,
         &0,
         &None,
-        &None,
-    );
+        &fluxora_stream::StreamKind::Linear,
+        );
     
     // Contract has 3000 tokens, 3000 liabilities
     assert_eq!(ctx.token.balance(&ctx.contract_id), 3_000);
