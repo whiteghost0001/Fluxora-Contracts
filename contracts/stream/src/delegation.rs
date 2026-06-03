@@ -20,7 +20,7 @@
 
 use soroban_sdk::Env;
 
-use crate::{load_delegated_nonce, load_stream, ContractError};
+use crate::{load_stream, load_delegated_nonce, ContractError};
 
 /// Validate the delegation parameters for a delegated-withdraw call.
 ///
