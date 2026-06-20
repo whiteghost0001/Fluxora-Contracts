@@ -354,7 +354,7 @@ impl FluxoraGovernance {
         let mut signers = get_signers(&env)?;
         let mut idx: Option<u32> = None;
         for i in 0..signers.len() {
-            if signers.get(i).unwrap() == signer {
+            if signers.get(i).is_some_and(|candidate| candidate == signer) {
                 idx = Some(i);
                 break;
             }
@@ -475,7 +475,11 @@ impl FluxoraGovernance {
 
         // Prevent duplicate approvals.
         for i in 0..proposal.approvals.len() {
-            if proposal.approvals.get(i).unwrap() == approver {
+            if proposal
+                .approvals
+                .get(i)
+                .is_some_and(|existing| existing == approver)
+            {
                 return Err(GovernanceError::AlreadyApproved);
             }
         }
@@ -696,7 +700,7 @@ impl FluxoraGovernance {
 
     fn is_signer(signers: &Vec<Address>, addr: &Address) -> bool {
         for i in 0..signers.len() {
-            if &signers.get(i).unwrap() == addr {
+            if signers.get(i).is_some_and(|signer| &signer == addr) {
                 return true;
             }
         }
@@ -705,9 +709,11 @@ impl FluxoraGovernance {
 
     fn require_unique_signers(signers: &Vec<Address>) -> Result<(), GovernanceError> {
         for i in 0..signers.len() {
-            let signer = signers.get(i).unwrap();
+            let Some(signer) = signers.get(i) else {
+                continue;
+            };
             for j in (i + 1)..signers.len() {
-                if signers.get(j).unwrap() == signer {
+                if signers.get(j).is_some_and(|candidate| candidate == signer) {
                     return Err(GovernanceError::DuplicateSigner);
                 }
             }
