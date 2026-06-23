@@ -194,7 +194,10 @@ const KEEPER_FEE_BPS: u64 = 50;
 ///
 /// Bumped to 4: accrual paths track the last ledger timestamp they observed in
 /// instance storage to detect retrograde test clocks and migration regressions.
-pub const CONTRACT_VERSION: u32 = 4;
+///
+/// Bumped to 5: `DataKey::PausedStreamCount` added and maintained across pause/
+/// resume/cancel/complete transitions; `get_paused_stream_count()` O(1) view added.
+pub const CONTRACT_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -975,6 +978,10 @@ pub enum DataKey {
     RotationHistory(u64),
     /// Last ledger timestamp observed for accrual clock-regression detection.
     LastAccrualLedgerTimestamp,
+    /// Protocol-wide count of streams currently in `StreamStatus::Paused` (`u64`, instance storage).
+    /// Appended last to preserve existing discriminant values; absent on pre-upgrade deployments
+    /// (treated as 0 until pause/resume/cancel/complete transitions repopulate it).
+    PausedStreamCount,
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,6 +1151,46 @@ fn read_stream_count(env: &Env) -> u64 {
 fn set_stream_count(env: &Env, count: u64) {
     env.storage().instance().set(&DataKey::NextStreamId, &count);
     bump_instance_ttl(env);
+}
+
+/// Read the protocol-wide count of streams currently in `StreamStatus::Paused`.
+/// Returns `0` when the key is absent (pre-upgrade deployments).
+fn read_paused_stream_count(env: &Env) -> u64 {
+    bump_instance_ttl(env);
+    env.storage()
+        .instance()
+        .get(&DataKey::PausedStreamCount)
+        .unwrap_or(0u64)
+}
+
+fn write_paused_stream_count(env: &Env, count: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PausedStreamCount, &count);
+    bump_instance_ttl(env);
+}
+
+/// Maintain the global paused-stream counter from a single stream status transition.
+///
+/// The counter changes only when a stream actually crosses the `Paused` boundary:
+/// - `!= Paused -> Paused` increments by 1
+/// - `Paused -> != Paused` decrements by 1 (saturating at 0 for upgrade safety)
+/// - all other transitions leave the counter unchanged
+fn reconcile_paused_stream_count(env: &Env, previous: StreamStatus, next: StreamStatus) {
+    if previous == next {
+        return;
+    }
+
+    match (previous, next) {
+        (StreamStatus::Paused, StreamStatus::Paused) => {}
+        (StreamStatus::Paused, _) => {
+            write_paused_stream_count(env, read_paused_stream_count(env).saturating_sub(1));
+        }
+        (_, StreamStatus::Paused) => {
+            write_paused_stream_count(env, read_paused_stream_count(env).saturating_add(1));
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1932,6 +1979,9 @@ impl FluxoraStream {
         env.storage().instance().set(&DataKey::NextStreamId, &0u64);
         env.storage()
             .instance()
+            .set(&DataKey::PausedStreamCount, &0u64);
+        env.storage()
+            .instance()
             .set(&DataKey::NextTemplateId, &0u64);
         env.storage()
             .instance()
@@ -2677,9 +2727,11 @@ impl FluxoraStream {
             return Err(ContractError::PauseCooldownActive);
         }
 
+        let previous_status = stream.status;
         stream.status = StreamStatus::Paused;
         stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
 
         let reason_str = match reason {
             PauseReason::Operational => soroban_sdk::String::from_str(&env, "Operational"),
@@ -2744,9 +2796,11 @@ impl FluxoraStream {
             return Err(ContractError::PauseCooldownActive);
         }
 
+        let previous_status = stream.status;
         stream.status = StreamStatus::Active;
         stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
 
         env.events().publish(
             (symbol_short!("resumed"), stream_id),
@@ -2933,10 +2987,12 @@ impl FluxoraStream {
         let completed_now = (stream.status == StreamStatus::Active
             || stream.status == StreamStatus::Paused)
             && stream.withdrawn_amount == stream.deposit_amount;
+        let previous_status = stream.status;
         if completed_now {
             stream.status = StreamStatus::Completed;
         }
         save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
 
         // Reduce liabilities as tokens leave the contract to the recipient.
         let liabilities = read_total_liabilities(&env)
@@ -3068,10 +3124,12 @@ impl FluxoraStream {
         let completed_now = (stream.status == StreamStatus::Active
             || stream.status == StreamStatus::Paused)
             && stream.withdrawn_amount == stream.deposit_amount;
+        let previous_status = stream.status;
         if completed_now {
             stream.status = StreamStatus::Completed;
         }
         save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
 
         // Reduce liabilities as tokens leave the contract.
         let liabilities = read_total_liabilities(&env)
@@ -3352,10 +3410,12 @@ impl FluxoraStream {
                 let completed_now = (stream.status == StreamStatus::Active
                     || stream.status == StreamStatus::Paused)
                     && stream.withdrawn_amount == stream.deposit_amount;
+                let previous_status = stream.status;
                 if completed_now {
                     stream.status = StreamStatus::Completed;
                 }
                 save_stream(&env, &stream);
+                reconcile_paused_stream_count(&env, previous_status, stream.status);
 
                 // Reduce liabilities as tokens leave the contract.
                 let liabilities = read_total_liabilities(&env)
@@ -3496,10 +3556,12 @@ impl FluxoraStream {
                 let completed_now = (stream.status == StreamStatus::Active
                     || stream.status == StreamStatus::Paused)
                     && stream.withdrawn_amount == stream.deposit_amount;
+                let previous_status = stream.status;
                 if completed_now {
                     stream.status = StreamStatus::Completed;
                 }
                 save_stream(&env, &stream);
+                reconcile_paused_stream_count(&env, previous_status, stream.status);
 
                 push_token(&env, &param.destination, withdrawable)?;
 
@@ -3683,10 +3745,12 @@ impl FluxoraStream {
         let completed_now = (stream.status == StreamStatus::Active
             || stream.status == StreamStatus::Paused)
             && stream.withdrawn_amount == stream.deposit_amount;
+        let previous_status = stream.status;
         if completed_now {
             stream.status = StreamStatus::Completed;
         }
         save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
 
         // 10. Increment nonce to prevent replay.
         increment_delegated_nonce(&env, &stream.recipient);
@@ -4165,6 +4229,17 @@ impl FluxoraStream {
     /// each successful stream creation.
     pub fn get_stream_count(env: Env) -> u64 {
         read_stream_count(&env)
+    }
+
+    /// Return the protocol-wide number of streams currently in `StreamStatus::Paused`.
+    ///
+    /// This view is O(1): it reads the maintained `DataKey::PausedStreamCount` instance key
+    /// instead of forcing indexers or dashboards to enumerate every stream.
+    ///
+    /// On upgraded deployments the key may initially be absent, in which case this view
+    /// returns `0` until post-upgrade pause/resume/cancel/complete transitions repopulate it.
+    pub fn get_paused_stream_count(env: Env) -> u64 {
+        read_paused_stream_count(&env)
     }
 
     /// Update the `rate_per_second` of an existing stream.
@@ -5167,9 +5242,11 @@ impl FluxoraStream {
             .ok_or(ContractError::InvalidState)?;
 
         // CEI: persist terminal state before external token transfer.
+        let previous_status = stream.status;
         stream.status = StreamStatus::Cancelled;
         stream.cancelled_at = Some(now);
         save_stream(env, stream);
+        reconcile_paused_stream_count(env, previous_status, stream.status);
 
         // Reduce liabilities by the refunded (unstreamed) portion.
         // The accrued portion remains a liability until the recipient withdraws.
@@ -5389,9 +5466,11 @@ impl FluxoraStream {
         let (was_underfunded, _, _) = compute_stream_health(&stream, now);
 
         // CEI: write terminal state before any external token transfer.
+        let previous_status = stream.status;
         stream.status = StreamStatus::Cancelled;
         stream.cancelled_at = Some(now);
         save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
 
         // Reduce liabilities by the total outstanding balance (recipient + sender portions).
         let total_outstanding = recipient_amount
@@ -5488,9 +5567,11 @@ impl FluxoraStream {
             return Err(ContractError::PauseCooldownActive);
         }
 
+        let previous_status = stream.status;
         stream.status = StreamStatus::Paused;
         stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
 
         let reason_str = match reason {
             PauseReason::Operational => soroban_sdk::String::from_str(&env, "Operational"),
@@ -5561,9 +5642,11 @@ impl FluxoraStream {
             return Err(ContractError::PauseCooldownActive);
         }
 
+        let previous_status = stream.status;
         stream.status = StreamStatus::Active;
         stream.last_pause_toggle_ledger = current_ledger;
         save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
 
         env.events().publish(
             (symbol_short!("resumed"), stream_id),
@@ -6166,11 +6249,13 @@ impl FluxoraStream {
             .unwrap_or(i128::MAX);
 
         // Check if stream is now completed
+        let previous_status = stream.status;
         if stream.withdrawn_amount >= stream.deposit_amount {
             stream.status = StreamStatus::Completed;
         }
 
         save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
 
         // Emit auto-claim triggered event
         env.events().publish(
@@ -6842,9 +6927,11 @@ pub fn bulk_cancel_streams(
         }
 
         // ── Mark stream as cancelled ──────────────────────────────────────
+        let previous_status = stream.status;
         stream.status = StreamStatus::Cancelled;
         stream.cancelled_at = Some(now);
         save_stream(&env, &stream);
+        reconcile_paused_stream_count(&env, previous_status, stream.status);
 
         // ── Accumulate sender refund ──────────────────────────────────────
         if refund_amount > 0 {
